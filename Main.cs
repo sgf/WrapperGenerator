@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Reflection;
+using System.Runtime;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -19,8 +19,10 @@ namespace WrapperGenerator
                                       where typeof(IWrapperBuilder).IsAssignableFrom(Typ) && !Typ.IsInterface
                                       select (IWrapperBuilder)Activator.CreateInstance(Typ)).ToArray();
 
-        IWrapperBuilder CurrentBuilder {
-            get {
+        IWrapperBuilder CurrentBuilder
+        {
+            get
+            {
                 return (from x in Builders where x.Name == CBoxMode.Text select x).Single();
             }
         }
@@ -64,15 +66,15 @@ namespace WrapperGenerator
         {
             IntPtr Handler = IntPtr.Zero;
             string[] Symbols = new string[0];
-            
+
             if (Path.GetExtension(FileName).ToLower() == ".dll")
             {
                 Symbols = GetExports(FileName);
                 Handler = LoadLibraryW(FileName);
-                
+
                 if (Marshal.GetLastWin32Error() == 0x000000c1 && LastFile != FileName)
                     MessageBox.Show("This Library isn't to the current architeture of the WrapperGenerator instance.", "WrapperGenerator", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                
+
                 LastFile = FileName;
                 FileName = await Decompile(FileName);
             }
@@ -86,19 +88,22 @@ namespace WrapperGenerator
             string[] Source = await File.ReadAllLinesAsync(FileName);
 
             SourceParser Parser = new SourceParser(Source);
-            var Functions = (from x in Parser.Parse() where
+            var Functions = (from x in Parser.Parse()
+                             where
                                    !x.Name.StartsWith("sub_") &&
                                    !x.Name.StartsWith("SEH_")
                              select x).ToArray();
 
-            
-            if (Handler != IntPtr.Zero)            
-                Functions = (from x in Functions where 
+
+            if (Handler != IntPtr.Zero)
+                Functions = (from x in Functions
+                             where
                                    GetProcAddress(Handler, x.Name) != IntPtr.Zero || Symbols.Where(z => z.Equals(x.Name, StringComparison.InvariantCultureIgnoreCase)).Any()
                              select x).ToArray();
 
             if (tbRegex.Text.Trim() != string.Empty && IsValidRegex(tbRegex.Text))
-                Functions = (from x in Functions where
+                Functions = (from x in Functions
+                             where
                                    Regex.IsMatch(x.Name, tbRegex.Text) ||
                                    Regex.IsMatch(x.ToString(), tbRegex.Text)
                              select x).ToArray();
@@ -156,40 +161,114 @@ namespace WrapperGenerator
                 }
             }
 
-            string X64ProgFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles).Replace(" (x86)", "");
-            string X86ProgFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
 
-            X64ProgFiles = X64ProgFiles.Substring(3);
-            X86ProgFiles = X86ProgFiles.Substring(3);
-
-            List<string> AllProgramFiles = new List<string>();
-
-            foreach (DriveInfo Drive in DriveInfo.GetDrives())
-            {
-                string ProgFilesPath = Path.Combine(Drive.RootDirectory.FullName, X64ProgFiles);
-                if (Directory.Exists(ProgFilesPath))
-                    AllProgramFiles.AddRange(Directory.GetDirectories(ProgFilesPath));
+            var paths = SearchWindowPath(Names);
+            if (paths.Count > 0)
+                LastIDADir = paths.First();
 
 
-                ProgFilesPath = Path.Combine(Drive.RootDirectory.FullName, X86ProgFiles);
-                if (Directory.Exists(ProgFilesPath))
-                    AllProgramFiles.AddRange(Directory.GetDirectories(ProgFilesPath));
-            }
+            //string X64ProgFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles).Replace(" (x86)", "");
+            //string X86ProgFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
 
-            foreach (string Dir in AllProgramFiles)
-            {
-                foreach (string Name in Names)
-                {
-                    LastIDADir = Dir;
-                    string FullPath = Path.Combine(Dir, Name);
-                    if (File.Exists(FullPath))
-                        return FullPath;
-                }
-            }
+            //X64ProgFiles = X64ProgFiles.Substring(3);
+            //X86ProgFiles = X86ProgFiles.Substring(3);
+
+            //List<string> AllProgramFiles = new List<string>();
+
+            //foreach (DriveInfo Drive in DriveInfo.GetDrives())
+            //{
+            //    string ProgFilesPath = Path.Combine(Drive.RootDirectory.FullName, X64ProgFiles);
+            //    if (Directory.Exists(ProgFilesPath))
+            //        AllProgramFiles.AddRange(Directory.GetDirectories(ProgFilesPath));
+
+
+            //    ProgFilesPath = Path.Combine(Drive.RootDirectory.FullName, X86ProgFiles);
+            //    if (Directory.Exists(ProgFilesPath))
+            //        AllProgramFiles.AddRange(Directory.GetDirectories(ProgFilesPath));
+            //}
+
+            //foreach (string Dir in AllProgramFiles)
+            //{
+            //    foreach (string Name in Names)
+            //    {
+            //        LastIDADir = Dir;
+            //        string FullPath = Path.Combine(Dir, Name);
+            //        if (File.Exists(FullPath))
+            //            return FullPath;
+            //    }
+            //}
 
             return null;
         }
-        
+
+        /// <summary>
+        /// if multi,return first
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="processName"></param>
+        /// <returns></returns>
+        public static List<string> SearchWindowPath(params string[] processNames)
+        {
+            Dictionary<IntPtr, WindowInfo> HwndAndPids = new Dictionary<IntPtr, WindowInfo>();
+
+            EnumDesktopWindows(IntPtr.Zero, (hWnd, lParam) =>
+            {
+                var winInfo = GetWindowInfo(hWnd);
+                if (winInfo.IsDefault) return true; //没拿到窗口信息,就直接返回了
+                HwndAndPids.Add(hWnd, winInfo);
+                return true;
+            }, IntPtr.Zero);
+
+            var paths = HwndAndPids.Values.Where(x => processNames.Any(y => x.ProcessName.Contains(y)))
+                .Select(x => Process.GetProcessById(x.PID).MainModule.FileName);
+            return paths.ToList();
+        }
+
+        public static WindowInfo GetWindowInfo(IntPtr hwnd)
+        {
+            if (GetWindowProcessId(hwnd, out var pid))
+            {
+                var proc = GetProcessById(pid);
+                if (proc != null)
+                    return new WindowInfo { Hwnd = hwnd, PID = pid, ProcessName = proc.ProcessName };
+            }
+            return default;
+        }
+
+        public static Process GetProcessById(int pid)
+        {
+            try
+            {
+                return Process.GetProcessById(pid);
+            }
+            catch (Exception e)
+            {
+                return null;
+            }
+        }
+        public struct WindowInfo
+        {
+            public IntPtr Hwnd;
+            public int PID;
+            public string ProcessName;
+            public bool IsDefault => Hwnd == default(IntPtr);
+        }
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        public static extern int GetWindowThreadProcessId(IntPtr hwnd, out int pid);
+
+        public static bool GetWindowProcessId(IntPtr hwnd, out int pid) => GetWindowThreadProcessId(hwnd, out pid) != 0;
+
+        // Code from https://pinvoke.net/default.aspx/user32/EnumWindows.html
+        // and from https://www.experts-exchange.com/questions/24331722/Getting-the-list-of-Open-Window-Handles-in-C.html
+        // and a condescending bit from http://csharphelper.com/blog/2016/08/list-desktop-windows-in-c/
+
+        public delegate bool EnumWindowsCallback(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll", EntryPoint = "EnumDesktopWindows",
+        ExactSpelling = false, CharSet = CharSet.Auto, SetLastError = true)]
+        public static extern bool EnumDesktopWindows(IntPtr hDesktop, EnumWindowsCallback lpEnumCallbackFunction, IntPtr lParam);
+
         private static bool IsValidRegex(string pattern)
         {
             if (string.IsNullOrEmpty(pattern)) return false;
@@ -222,8 +301,8 @@ namespace WrapperGenerator
             {
                 return null;
             }
-            
-            baseOfDll = SymLoadModuleEx(hCurrentProcess,IntPtr.Zero, Module, null, 0, 0, IntPtr.Zero, 0);
+
+            baseOfDll = SymLoadModuleEx(hCurrentProcess, IntPtr.Zero, Module, null, 0, 0, IntPtr.Zero, 0);
 
             if (baseOfDll == 0)
             {
@@ -248,13 +327,13 @@ namespace WrapperGenerator
         }
         [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Unicode)]
         static extern IntPtr LoadLibraryW(string FileName);
-        
+
         [DllImport("kernel32", CharSet = CharSet.Ansi, ExactSpelling = true, SetLastError = true)]
         static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
-        
+
         [DllImport("dbghelp.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        public static extern bool SymInitialize(IntPtr hProcess, string UserSearchPath, [MarshalAs(UnmanagedType.Bool)]bool fInvadeProcess);
+        public static extern bool SymInitialize(IntPtr hProcess, string UserSearchPath, [MarshalAs(UnmanagedType.Bool)] bool fInvadeProcess);
 
         [DllImport("dbghelp.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         [return: MarshalAs(UnmanagedType.Bool)]
